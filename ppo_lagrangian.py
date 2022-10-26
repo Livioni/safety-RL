@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.functional import softplus
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
@@ -38,11 +39,19 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="safecartpole-v0",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=10000,
+    parser.add_argument("--total-timesteps", type=int, default=200000,
         help="total timesteps of the experiments")
-    parser.add_argument("--learning-rate", type=float, default=2.5e-4,
+    parser.add_argument("--learning-rate", type=float, default=3e-4,
         help="the learning rate of the optimizer")
-    parser.add_argument("--num-envs", type=int, default=4,
+    parser.add_argument("--penalty-lr", type=float, default=5e-4,
+        help="the learning rate of the penalty optimizer")
+    parser.add_argument("--xlambda", type=float, default=1.0,
+        help="the initial lambda")
+    parser.add_argument("--vf-lr", type=float, default=1e-4,
+        help="the learning rate of the value function optimizer")
+    parser.add_argument("--cost-limit", type=float, default=5,
+        help="the limit of cost per episode")
+    parser.add_argument("--num-envs", type=int, default=2,
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=128,
         help="the number of steps to run in each environment per policy rollout")
@@ -68,7 +77,7 @@ def parse_args():
         help="coefficient of the value function")
     parser.add_argument("--max-grad-norm", type=float, default=0.5,
         help="the maximum norm for the gradient clipping")
-    parser.add_argument("--target-kl", type=float, default=None,
+    parser.add_argument("--target-kl", type=float, default=0.012,
         help="the target KL divergence threshold")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -115,16 +124,26 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01),
         )
+        self.coster = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 1), std=0.01),
+        )
 
     def get_value(self, x):
         return self.critic(x)
+
+    def get_cvalue(self,x):
+        return self.coster(x)
 
     def get_action_and_value(self, x, action=None):
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+        return action, probs.log_prob(action), probs.entropy(), self.critic(x), self.coster(x)
 
 
 if __name__ == "__main__":
@@ -163,14 +182,21 @@ if __name__ == "__main__":
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.actor.parameters(), lr=args.learning_rate, eps=1e-5)
+    penalty_param = torch.tensor(args.xlambda,requires_grad=True).float()
+    actor_optimizer = optim.Adam(agent.actor.parameters(), lr=args.learning_rate, eps=1e-5)
+    critic_optimizer = optim.Adam(agent.critic.parameters(), lr=args.vf_lr, eps=1e-5)
+    cost_optimizer = optim.Adam(agent.coster.parameters(), lr=args.vf_lr, eps=1e-5)
+    penalty_optimizer =optim.Adam([penalty_param], lr=args.penalty_lr)#惩罚系数优化器
+
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    costs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    cvalues = torch.zeros((args.num_steps, args.num_envs)).to(device) 
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -184,8 +210,8 @@ if __name__ == "__main__":
         if args.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
             lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
-
+            actor_optimizer.param_groups[0]["lr"] = lrnow
+ 
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs
             obs[step] = next_obs
@@ -193,14 +219,19 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value, cvalue = agent.get_action_and_value(next_obs)
                 values[step] = value.flatten()
+                cvalues[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, done, info = envs.step(action.cpu().numpy())
+            cost_array = np.zeros(args.num_envs,dtype=np.float32)
+            for i in range(args.num_envs):
+                cost_array[i] = info[i]['cost']
             rewards[step] = torch.tensor(reward).to(device).view(-1)
+            costs[step] = torch.tensor(cost_array).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
             for item in info:
@@ -208,6 +239,7 @@ if __name__ == "__main__":
                     print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
                     writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
+                    writer.add_scalar("charts/episodic_cost", item["episode"]["c"], global_step)
                     break
 
         # bootstrap value if not done
@@ -225,14 +257,54 @@ if __name__ == "__main__":
                 delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
+        
+            next_cvalue = agent.get_cvalue(next_obs).reshape(1, -1)
+            c_advantages = torch.zeros_like(costs).to(device)
+            lastgaelam = 0
+            for t in reversed(range(args.num_steps)):
+                if t == args.num_steps - 1:
+                    nextnonterminal = 1.0 - next_done
+                    nextcvalues = next_cvalue
+                else:
+                    nextnonterminal = 1.0 - dones[t + 1]
+                    nextcvalues = cvalues[t + 1]
+                delta = costs[t] + args.gamma * nextcvalues * nextnonterminal - cvalues[t]
+                c_advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+            creturns = c_advantages + cvalues
+
+            #calculate average ep cost
+            episode_cost = []
+            accumulate_cost = torch.zeros([args.num_envs],dtype=torch.float32)
+            for t in range(args.num_steps):
+                if torch.eq(dones[t],torch.zeros([args.num_envs],dtype=torch.float32)).all().item() is True :
+                    accumulate_cost += costs[t]
+                else: 
+                    indx = torch.where(dones[t]==1)
+                    for add in indx[0]:
+                        episode_cost.append(accumulate_cost[add.item()].item())
+                        accumulate_cost[add.item()] = 0
+            average_ep_cost = np.mean(episode_cost)
+
 
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_costs = costs.reshape(-1)
         b_advantages = advantages.reshape(-1)
+        b_cadvantages = c_advantages.reshape(-1)
         b_returns = returns.reshape(-1)
+        b_creturns = creturns.reshape(-1)
         b_values = values.reshape(-1)
+        b_cvalues = cvalues.reshape(-1)
+
+        # Optimizing the lambda
+        cost_devitation = average_ep_cost - args.cost_limit
+        #update lambda
+        loss_penalty = - penalty_param * cost_devitation
+        penalty_optimizer.zero_grad()
+        loss_penalty.backward()
+        penalty_optimizer.step()
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
@@ -243,7 +315,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
+                _, newlogprob, entropy, newvalue, newcvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -254,13 +326,33 @@ if __name__ == "__main__":
                     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
 
                 mb_advantages = b_advantages[mb_inds]
+                mb_cadvantages = b_cadvantages[mb_inds]
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_cadvantages = (mb_cadvantages - mb_cadvantages.mean()) / (mb_cadvantages.std() + 1e-8)
 
                 # Policy loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                pg_loss1 = mb_advantages * ratio
+                pg_loss2 = mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                pg_loss = torch.min(pg_loss1, pg_loss2).mean()
+                
+                cpg_loss = ratio * mb_cadvantages
+                cpg_loss = cpg_loss.mean()
+
+                p = softplus(penalty_param)
+                penalty_item = p.item()
+
+                entropy_loss = entropy.mean()
+                # Create policy objective function, including entropy regularization
+                objective = pg_loss + args.ent_coef * entropy_loss
+
+                # Possibly include cpg_loss in objective
+                objective -= penalty_item * cpg_loss
+                objective = -objective/(1+penalty_item)
+
+                actor_optimizer.zero_grad()
+                objective.backward()
+                actor_optimizer.step()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
@@ -277,13 +369,28 @@ if __name__ == "__main__":
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                newcvalue = newcvalue.view(-1)
+                if args.clip_vloss:
+                    cv_loss_unclipped = (newcvalue - b_creturns[mb_inds]) ** 2
+                    cv_clipped = b_cvalues[mb_inds] + torch.clamp(
+                        newcvalue - b_cvalues[mb_inds],
+                        -args.clip_coef,
+                        args.clip_coef,
+                    )
+                    cv_loss_clipped = (cv_clipped - b_creturns[mb_inds]) ** 2
+                    cv_loss_max = torch.max(cv_loss_unclipped, cv_loss_clipped)
+                    cv_loss = 0.5 * cv_loss_max.mean()
+                else:
+                    cv_loss = 0.5 * ((newcvalue - b_creturns[mb_inds]) ** 2).mean()                    
 
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                optimizer.step()
+                critic_optimizer.zero_grad()
+                v_loss.backward()
+                critic_optimizer.step()
+
+                cost_optimizer.zero_grad()
+                cv_loss.backward()
+                cost_optimizer.step()
+
 
             if args.target_kl is not None:
                 if approx_kl > args.target_kl:
@@ -294,8 +401,9 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        writer.add_scalar("charts/learning_rate", actor_optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+        writer.add_scalar("losses/cost_value_loss", cv_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
         writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
