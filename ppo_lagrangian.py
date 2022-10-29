@@ -37,7 +37,7 @@ def parse_args():
         help="whether to capture videos of the agent performances (check out `videos` folder)")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="safecartpole-v0",
+    parser.add_argument("--env-id", type=str, default="point-v0",
         help="the id of the environment")
     parser.add_argument("--total-timesteps", type=int, default=200000,
         help="total timesteps of the experiments")
@@ -283,7 +283,10 @@ if __name__ == "__main__":
                     for add in indx[0]:
                         episode_cost.append(accumulate_cost[add.item()].item())
                         accumulate_cost[add.item()] = 0
-            average_ep_cost = np.mean(episode_cost)
+            if episode_cost == []:
+                average_ep_cost = 0
+            else:
+                average_ep_cost = np.mean(episode_cost)
 
 
         # flatten the batch

@@ -1,7 +1,15 @@
 # safety RL
 
-github上关于safety RL算法实现比较少，目前也没有一个库有实现。
+## Environment
 
-该仓库记录了自己的安全强化学习代码实现，为了小而美，Primal-Dual based algorithms 是用的cleanrl实现的。
+1. Point-Circle (Source : Constrained Policy Optimization)
 
-希望有懂哥帮忙看看。
+## Implementations:
+
+​	[X] ppo-lagrangian
+
+## Results
+
+
+
+![截屏2022-10-29 16.15.43](README.assets/%E6%88%AA%E5%B1%8F2022-10-29%2016.15.43.png)

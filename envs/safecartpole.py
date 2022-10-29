@@ -1,14 +1,10 @@
-"""
-Classic cart-pole system implemented by Rich Sutton et al.
-Copied from http://incompleteideas.net/sutton/book/code/pole.c
-permalink: https://perma.cc/C9ZM-652R
-"""
-
 import math
 import gym
 from gym import spaces, logger
 from gym.utils import seeding
 import numpy as np
+
+#add penalty for safe rl training 
 
 class SafeCartPoleEnv(gym.Env):
     """
@@ -115,6 +111,10 @@ class SafeCartPoleEnv(gym.Env):
                 or theta > self.theta_threshold_radians
         done = bool(done)
 
+        cost = 0
+        if x_dot <= -0.5 or x_dot >= 0.5:
+            cost = 1
+
         if not done:
             reward = 1.0
         elif self.steps_beyond_done is None:
@@ -127,7 +127,7 @@ class SafeCartPoleEnv(gym.Env):
             self.steps_beyond_done += 1
             reward = 0.0
 
-        return np.array(self.state), reward, done, {}
+        return np.array(self.state), reward, done, {'cost':cost}
 
     def reset(self):
         self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
