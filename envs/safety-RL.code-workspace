@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../../../../../../opt/anaconda3/envs/cleanrl/lib/python3.9/site-packages/gym/envs/classic_control/safeEnvs"
+		}
+	],
+	"settings": {}
+}
