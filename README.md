@@ -104,7 +104,7 @@ $$
 \operatorname{Loss}\left(\psi_c\right)=\frac{1}{M|T|} \sum_{\tau \in M} \sum_{t=0}^T\left(V_{\psi_c}^C\left(s_t\right)-\hat{C}_t\right)^2
 $$
 
- where $A_t^R=\sum_{l=0}^k(\gamma \bar{\lambda})^l \delta_{t+l}^R$,   and $A_t^C=\sum_{l=0}^k(\gamma \bar{\lambda})^l \delta_{t+l}^C$.  M is  mini-batch of size ≤ NT.
+ where $A_t^R=\sum_{l=0}^k(\gamma \bar{\lambda})^l \delta_{t+l}^R$,   and $A_t^C=\sum_{l=0}^k(\gamma \bar{\lambda})^l \delta_{t+l}^C$.  M is  mini-batch of size $\leq NT$.
 
 Let $δ^R_t = r_{t+1} + V^ R_ {ψ_r} (s_{t+1}) − V^R_{ψ_r} (s_t)$ and $δ^C_t = c_{t+1} + V^C_{ψ_c} (s_{t+1}) − V^ C_{ ψ_c} (s_t)$,
 
